@@ -1,8 +1,8 @@
 import axios from "axios"
-
+const uuid = require('uuid').v4;
 // initializing axios
 const api = axios.create({
-  baseURL: "http://localhost:3000",
+  baseURL: "http://localhost:3000"
 })
 
 // original source: https://github.com/pilovm/multithreaded-uploader/blob/master/frontend/uploader.js
@@ -11,11 +11,11 @@ export class Uploader {
     // this must be bigger than or equal to 5MB,
     // otherwise AWS will respond with:
     // "Your proposed upload is smaller than the minimum allowed size"
-    this.chunkSize = options.chunkSize || 1024 * 1024 * 5
+    this.chunkSize = options.chunkSize || 1024 * 1024 * 10; // 5MB
     // number of parallel uploads
     this.threadsQuantity = Math.min(options.threadsQuantity || 5, 15)
     this.file = options.file
-    this.fileName = options.fileName
+    this.fileName = `${uuid()}_${this.file.name}`
     this.aborted = false
     this.uploadedSize = 0
     this.progressCache = {}
@@ -24,8 +24,8 @@ export class Uploader {
     this.uploadedParts = []
     this.fileId = null
     this.fileKey = null
-    this.onProgressFn = () => {}
-    this.onErrorFn = () => {}
+    this.onProgressFn = () => { }
+    this.onErrorFn = () => { }
   }
 
   start() {
@@ -36,15 +36,17 @@ export class Uploader {
     try {
       // adding the the file extension (if present) to fileName
       let fileName = this.fileName
-      const ext = this.file.name.split(".").pop()
-      if (ext) {
-        fileName += `.${ext}`
-      }
+      console.log("Filename:", fileName);
+      // const ext = this.file.name.split(".").pop()
+      // if (ext) {
+      //   fileName += `.${ext}`
+      // }
 
       // initializing the multipart request
       const videoInitializationUploadInput = {
         name: fileName,
       }
+
       const initializeReponse = await api.request({
         url: "/uploads/initializeMultipartUpload",
         method: "POST",
@@ -53,16 +55,17 @@ export class Uploader {
 
       const AWSFileDataOutput = initializeReponse.data
 
-      this.fileId = AWSFileDataOutput.fileId
-      this.fileKey = AWSFileDataOutput.fileKey
+      this.fileId = AWSFileDataOutput.fileId // uploadID
+      this.fileKey = AWSFileDataOutput.fileKey // fileName
 
       // retrieving the pre-signed URLs
       const numberOfparts = Math.ceil(this.file.size / this.chunkSize)
 
+      //PAYLOAD:: 2
       const AWSMultipartFileDataInput = {
         fileId: this.fileId,
         fileKey: this.fileKey,
-        parts: numberOfparts,
+        parts: numberOfparts
       }
 
       const urlsResponse = await api.request({
@@ -71,8 +74,13 @@ export class Uploader {
         data: AWSMultipartFileDataInput,
       })
 
+      console.log("urlsResponse:", urlsResponse);
+
       const newParts = urlsResponse.data.parts
       this.parts.push(...newParts)
+
+      console.log("Parts[]:", this.parts);
+
 
       this.sendNext()
     } catch (error) {
@@ -82,13 +90,15 @@ export class Uploader {
 
   sendNext() {
     const activeConnections = Object.keys(this.activeConnections).length
-
+    console.log("The active connections are ", activeConnections)
     if (activeConnections >= this.threadsQuantity) {
       return
     }
 
     if (!this.parts.length) {
+      console.log("This is parts length null")
       if (!activeConnections) {
+        console.log("This is send next complete")
         this.complete()
       }
 
@@ -96,27 +106,37 @@ export class Uploader {
     }
 
     const part = this.parts.pop()
+    console.log("Part:", part);
+
     if (this.file && part) {
-      const sentSize = (part.PartNumber - 1) * this.chunkSize
-      const chunk = this.file.slice(sentSize, sentSize + this.chunkSize)
+      console.log("PartNumber:", part.PartNumber);
+      const sentSize = (part.PartNumber - 1) * this.chunkSize // 3 * 10MB  = 40MB -46MB
+      console.log("SendSize:", sentSize);
+      const chunk = this.file.slice(sentSize, sentSize + this.chunkSize) //30-40 = 10MB
 
       const sendChunkStarted = () => {
         this.sendNext()
       }
 
+      // chunk , partNumber
       this.sendChunk(chunk, part, sendChunkStarted)
         .then(() => {
+          console.log("This is send chunk send next")
           this.sendNext()
         })
         .catch((error) => {
+          console.log("Send Chunk Error : ", error)
           this.parts.push(part)
 
+          console.log("Part Arr : ", this.parts)
           this.complete(error)
         })
     }
   }
 
   async complete(error) {
+    console.log("This is complete function. ")
+    console.log("This is error : ", error)
     if (error && !this.aborted) {
       this.onErrorFn(error)
       return
@@ -135,6 +155,7 @@ export class Uploader {
   }
 
   async sendCompleteRequest() {
+
     if (this.fileId && this.fileKey) {
       const videoFinalizationMultiPartInput = {
         fileId: this.fileId,
@@ -142,15 +163,23 @@ export class Uploader {
         parts: this.uploadedParts,
       }
 
+      console.log("Final:", videoFinalizationMultiPartInput);
+
       await api.request({
         url: "/uploads/finalizeMultipartUpload",
         method: "POST",
+        header: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Headers": "Origin, X-Requested-With, Content-Type, Accept",
+          "Access-Control-Allow-Methods": "*"
+        },
         data: videoFinalizationMultiPartInput,
       })
     }
   }
 
   sendChunk(chunk, part, sendChunkStarted) {
+    console.log("Chunk : ", chunk)
     return new Promise((resolve, reject) => {
       this.upload(chunk, part, sendChunkStarted)
         .then((status) => {
@@ -185,6 +214,7 @@ export class Uploader {
       const sent = Math.min(this.uploadedSize + inProgress, this.file.size)
 
       const total = this.file.size
+      console.log("Total :", total);
 
       const percentage = Math.round((sent / total) * 100)
 
@@ -216,15 +246,34 @@ export class Uploader {
 
         xhr.onreadystatechange = () => {
           if (xhr.readyState === 4 && xhr.status === 200) {
-            const ETag = xhr.getResponseHeader("ETag")
+            console.log("Here is on ready state change", xhr.getAllResponseHeaders())
+            // const ETag = xhr.getAllResponseHeaders("ETag")
+            
+            var headers = xhr.getAllResponseHeaders();
+            var arr = headers.trim().split(/[\r\n]+/);
+
+            // Create a map of header names to values
+            var headerMap = {};
+            arr.forEach(function (line) {
+              var parts = line.split(': ');
+              var header = parts.shift();
+              var value = parts.join(': ');
+              headerMap[header] = value;
+            });
+
+            const ETag = headerMap["etag"];
+            console.log("ETag: ", ETag);
 
             if (ETag) {
               const uploadedPart = {
                 PartNumber: part.PartNumber,
                 ETag: ETag.replaceAll('"', ""),
               }
+              console.log("ETag after change ", uploadedPart)
 
               this.uploadedParts.push(uploadedPart)
+
+              console.log("UPLOAD PARTS:", this.uploadedParts);
 
               resolve(xhr.status)
               delete this.activeConnections[part.PartNumber - 1]
